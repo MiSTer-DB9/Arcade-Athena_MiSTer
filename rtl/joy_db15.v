@@ -1,7 +1,8 @@
 //Control module for DB15 Splitter of Antonio Villena by Aitor Pelaez (NeuroRulez)
 //Based on the ZXDOS module written by me too.
 //
-module joy_db15 
+// [MiSTer-DB9] renamed joy_db15 -> joy_db15_snac to avoid duplicate module with framework sys/joydb15.v
+module joy_db15_snac 
 (
  input  clk,      //Reloj de Entrada sobre 48-50Mhz
  output JOY_CLK,
