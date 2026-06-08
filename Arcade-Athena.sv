@@ -166,8 +166,12 @@ module emu
 	// 1 - D-/TX
 	// 2..6 - USR2..USR6
 	// Set USER_OUT to 1 to read from USER_IN.
-	input   [6:0] USER_IN,
-	output  [6:0] USER_OUT,
+	// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: USER_OSD + per-pin push-pull mask, USER_IO widened to 8 bits
+	output        USER_OSD,
+	output  [7:0] USER_PP,
+	input   [7:0] USER_IN,
+	output  [7:0] USER_OUT,
+	// [MiSTer-DB9 END]
 
 	input         OSD_STATUS
 );
@@ -176,6 +180,9 @@ module emu
 
 assign ADC_BUS  = 'Z;
 //assign USER_OUT = '1;
+// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: USER_PP driven by wrapper; USER_OUT driven by joydb (USER_OUT_DRIVE) below
+assign USER_PP = USER_PP_DRIVE;
+// [MiSTer-DB9 END]
 assign {UART_RTS, UART_TXD, UART_DTR} = 0;
 assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 assign {SDRAM_DQ, SDRAM_A, SDRAM_BA, SDRAM_CLK, SDRAM_CKE, SDRAM_DQML, SDRAM_DQMH, SDRAM_nWE, SDRAM_nCAS, SDRAM_nRAS, SDRAM_nCS} = 'Z;
@@ -238,7 +245,13 @@ localparam CONF_STR = {
 	"P3-;",
 	"P4,SNAC;",
 	"P4-;",
-	"D1P4O[21:20],DB15 Devices,Off,OnlyP1,OnlyP2,P1&P2;",
+	// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: the framework joydb wrapper now owns USER_IO
+	// and supersedes the upstream SNK "DB15 Devices" (status[21:20]) selector.
+	// [MiSTer-DB9-Pro BEGIN] - Saturn-first joy_type (canonical bit notation)
+	"O[127:126],UserIO Joystick,Off,Saturn,DB9MD,DB15;",
+	"O[125],UserIO Players, 1 Player,2 Players;",
+	// [MiSTer-DB9-Pro END]
+	// [MiSTer-DB9 END]
 	"P4-;",
 	"DIP;",
 	"-;",
@@ -293,50 +306,79 @@ wire [127:0] status;
 
 wire [10:0] ps2_key;
 
-wire [15:0] joystick_0, joystick_1;
 logic [15:0] joystick_l_analog_0, joystick_r_analog_0 /* synthesis keep */;
 
-//SNAC joysticks
-wire [1:0] SNAC_dev = (game == 8'h14) ? 2'd0 : status[21:20]; //Disable for Country Golf
-wire         JOY_CLK, JOY_LOAD;
-wire         JOY_DATA  = USER_IN[5];
+// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: rename USB joystick wires (joydb-merged below)
+wire [15:0] joystick_0_USB, joystick_1_USB;
+// [MiSTer-DB9 END]
 
-always_comb begin
-	USER_OUT[0] = JOY_LOAD;
-	USER_OUT[1] = JOY_CLK;
-	USER_OUT[2] = 1'b1;
-	USER_OUT[3] = 1'b1;
-	USER_OUT[4] = 1'b1;
-	USER_OUT[5] = 1'b1;
-	USER_OUT[6] = 1'b1;
-end
+// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: joydb wrapper
+wire         CLK_JOY = CLK_50M;                 // Assign clock between 40-50Mhz
+wire   [1:0] joy_type_raw    = status[127:126]; // 0=Off, 1=Saturn, 2=DB9MD, 3=DB15
+wire         joy_2p          = status[125];
+// SNAC cores: replace 1'b0 with the core's SNAC enable expression so SNAC
+// preempts the joydb wrapper on shared USER_IO pins. No SNAC here -> 1'b0.
+wire         snac_active     = 1'b0;
+// MT32-pi cores on primary USER_IO: replace 1'b0 with the core's MT32-active
+// expression. No MT32 in this core, so 1'b0.
+wire         mt32_primary_active = 1'b0;
+wire   [1:0] joy_type        = snac_active ? 2'd0 : joy_type_raw;
+wire         joy_db9md_en    = (joy_type == 2'd2);
+wire         joy_db15_en     = (joy_type == 2'd3);
+wire         joy_any_en      = |joy_type;
+// [MiSTer-DB9 END]
 
-wire [15:0] JOYDB15_1,JOYDB15_2;
-joy_db15 joy_db15
-(
-  .clk       ( clk_53p6  ), //53.6MHz
-  .JOY_CLK   ( JOY_CLK   ),
-  .JOY_DATA  ( JOY_DATA  ),
-  .JOY_LOAD  ( JOY_LOAD  ),
-  .joystick1 ( JOYDB15_1 ),
-  .joystick2 ( JOYDB15_2 )	  
+// [MiSTer-DB9-Pro BEGIN] - Saturn key gate
+wire         saturn_unlocked;                   // driven by hps_io UIO_DB9_KEY (0xFE)
+// [MiSTer-DB9-Pro END]
+
+// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: joydb wrapper wires + instance
+wire   [7:0] USER_OUT_DRIVE;
+wire   [7:0] USER_PP_DRIVE;
+wire  [15:0] joydb_1, joydb_2;
+wire         joydb_1ena, joydb_2ena;
+wire  [15:0] joy_raw_payload;
+
+joydb joydb (
+  .clk             ( CLK_JOY         ),
+  .USER_IN         ( USER_IN         ),
+  .OSD_STATUS          ( OSD_STATUS          ),
+  .snac_active         ( snac_active         ),
+  .mt32_primary_active ( mt32_primary_active ),
+  .joy_type        ( joy_type        ),
+  .joy_2p          ( joy_2p          ),
+  .saturn_unlocked ( saturn_unlocked ),
+  .USER_OUT_DRIVE  ( USER_OUT_DRIVE  ),
+  .USER_PP_DRIVE   ( USER_PP_DRIVE   ),
+  .USER_OSD        ( USER_OSD        ),
+  .joydb_1         ( joydb_1         ),
+  .joydb_2         ( joydb_2         ),
+  .joydb_1ena      ( joydb_1ena      ),
+  .joydb_2ena      ( joydb_2ena      ),
+  .joy_raw         ( joy_raw_payload )
 );
 
-wire [15:0] JOY_DB1;
-wire [15:0] JOY_DB2;
-always_comb begin
-	if ((SNAC_dev[0] == 1'b1)) begin
-		JOY_DB1 = JOYDB15_1;
-	end else begin
-		JOY_DB1 = 16'hff;
-	end
+assign USER_OUT = USER_OUT_DRIVE;
+// [MiSTer-DB9 END]
 
-	if ((SNAC_dev[1] == 1'b1)) begin
-		JOY_DB2 = JOYDB15_2;
-	end else begin
-		JOY_DB2 = 16'hff;
-	end
-end
+// [MiSTer-DB9-Pro BEGIN] - DB controllers muted while OSD is open; per-core button remap
+// joydb output layout: [3:0]=R/L/D/U, [4]=A, [5]=B, [6]=C, [9]=Z, [10]=Start, [11]=Mode/R-trigger.
+// Athena consumer order (CONF_STR "J1,Button1,Button2,Start,Coin,Pause,Service"):
+//   [3:0]=UDLR  [4]=Button1(A)  [5]=Button2(B)  [6]=Start  [7]=Coin  [8]=Pause  [9]=Service
+// Standard 8-way + 2 buttons (digital). Coin-chord rule: Coin uses
+//   joydb[11] | (joydb[10] & joydb[5]) so a 3-button MD pad (no Mode/Select)
+//   can still insert coins via Start+B; 6-button MD / DB15 / Saturn use the
+//   native Mode/Select/R at [11] directly.
+//   Start   <- joydb[10] (Start)
+//   Pause   <- joydb[9]  (Z, convenience — not a cabinet button)
+//   Service <- joydb[6]  (C, spare face button)
+wire [15:0] joystick_0 = joydb_1ena ? (OSD_STATUS ? 16'b0 :
+        {6'b0, joydb_1[6], joydb_1[9], joydb_1[11]|(joydb_1[10]&joydb_1[5]), joydb_1[10], joydb_1[5:4], joydb_1[3:0]})
+        : joystick_0_USB;
+wire [15:0] joystick_1 = joydb_2ena ? (OSD_STATUS ? 16'b0 :
+        {6'b0, joydb_2[6], joydb_2[9], joydb_2[11]|(joydb_2[10]&joydb_2[5]), joydb_2[10], joydb_2[5:4], joydb_2[3:0]})
+        : joydb_1ena ? joystick_0_USB : joystick_1_USB;
+// [MiSTer-DB9-Pro END]
 
 hps_io #(.CONF_STR(CONF_STR)) hps_io
 (
@@ -362,8 +404,16 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 	.ioctl_wait(ioctl_wait),
 	
 	.ps2_key(ps2_key),
-	.joystick_0(joystick_0),
-	.joystick_1(joystick_1),
+	// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: feed USB joysticks into the joydb mux
+	.joystick_0(joystick_0_USB),
+	.joystick_1(joystick_1_USB),
+	// [MiSTer-DB9 END]
+	// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: joy_raw
+	.joy_raw(OSD_STATUS ? joy_raw_payload : 16'b0),
+	// [MiSTer-DB9 END]
+	// [MiSTer-DB9-Pro BEGIN] - Saturn key gate
+	.saturn_unlocked(saturn_unlocked),
+	// [MiSTer-DB9-Pro END]
 	// analog -127..+127, Y: [15:8], X: [7:0]
 	.joystick_l_analog_0(joystick_l_analog_0), //for countrygolf
 	.joystick_r_analog_0(joystick_r_analog_0)  //for countrygolf
@@ -563,6 +613,21 @@ wire m_pause2; //active high
 //db15:        //    11 L, 10 S, 9 F, 8 E, 7 D, 6 C, 5 B, 4 A, 3 U, 2 D, 1 L, 0 R
 //    10 9876543210
 //----LS FEDCBAUDLR
+	// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: upstream SNK DB15-SNAC path superseded by the
+	// joydb wrapper, which now owns USER_IO and merges DB9MD/DB15/Saturn into joystick_0/_1
+	// (see the joydb instance + mux above). The upstream SNK DB15-SNAC instance, its
+	// always_comb USER_OUT driver and USER_IN[5] read are removed (would collide with assign
+	// USER_OUT = USER_OUT_DRIVE and the framework's pin ownership). The matching rtl
+	// joy_db15.v registration is removed from files.qip (it also re-declares that module,
+	// which now duplicates sys/joydb15.v). Athena's consumers are TERNARY-GUARDED
+	// `(SNAC_dev[x]) ? ~JOY_DB[..] : ~joystick_*[..]`, so SNAC_dev = 2'd0 collapses EVERY
+	// consumer to the joystick arm and the JOY_DB value is irrelevant (JOY_DB1/2 = 16'h0000,
+	// documentary). Unlike XSleena's FLAT bitwise mixing form, no 16'hff hazard here.
+	wire [1:0]  SNAC_dev = 2'd0;
+	wire [15:0] JOY_DB1  = 16'h0000;
+	wire [15:0] JOY_DB2  = 16'h0000;
+	// [MiSTer-DB9 END]
+
 	assign m_up1       = (SNAC_dev[0]) ? ~JOY_DB1[3]  : ~joystick_0[3];
 	assign m_down1     = (SNAC_dev[0]) ? ~JOY_DB1[2]  : ~joystick_0[2];
 	assign m_left1     = (SNAC_dev[0]) ? ~JOY_DB1[1]  : ~joystick_0[1];
